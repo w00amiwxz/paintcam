@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finger Painter AI</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: sans-serif;
+        }
+        #canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        video {
+            display: none;
+        }
+        canvas {
+            position: absolute;
+            /* Убрали жесткое отзеркаливание из CSS, будем управлять им через JS для точности */
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        .controls {
+            pointer-events: auto;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px;
+            border-radius: 12px;
+            backdrop-filter: blur(5px);
+        }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container">
+    <video id="input_video"></video>
+    <canvas id="output_canvas"></canvas>
+    <canvas id="paint_canvas"></canvas>
+</div>
+
+<div id="ui-overlay">
+    <div class="controls flex flex-col gap-4">
+        <h1 class="text-xl font-bold">Рисование пальцами AI</h1>
+        <div class="flex items-center">
+            <div id="status-dot" class="status-dot bg-red-500"></div>
+            <span id="status-text">Загрузка...</span>
+        </div>
+        
+        <div class="flex gap-2">
+            <button onclick="changeColor('#ff4757')" class="w-8 h-8 rounded-full bg-[#ff4757] border-2 border-white"></button>
+            <button onclick="changeColor('#2ed573')" class="w-8 h-8 rounded-full bg-[#2ed573] border-2 border-transparent"></button>
+            <button onclick="changeColor('#1e90ff')" class="w-8 h-8 rounded-full bg-[#1e90ff] border-2 border-transparent"></button>
+            <button onclick="changeColor('#ffa502')" class="w-8 h-8 rounded-full bg-[#ffa502] border-2 border-transparent"></button>
+            <button onclick="changeColor('#ffffff')" class="w-8 h-8 rounded-full bg-white border-2 border-transparent"></button>
+        </div>
+
+        <button onclick="clearCanvas()" class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition">
+            Очистить
+        </button>
+        
+        <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="checkbox" id="mirrorMode" checked onchange="toggleMirror()" class="form-checkbox h-4 w-4">
+            Зеркальный режим
+        </label>
+    </div>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const paintCanvas = document.getElementById('paint_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const paintCtx = paintCanvas.getContext('2d');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const mirrorCheckbox = document.getElementById('mirrorMode');
+
+    let currentColor = '#ff4757';
+    let isDrawing = false;
+    let lastX = 0;
+    let lastY = 0;
+    let isMirrored = true;
+
+    function resize() {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        canvasElement.width = width;
+        canvasElement.height = height;
+        paintCanvas.width = width;
+        paintCanvas.height = height;
+        
+        paintCtx.lineCap = 'round';
+        paintCtx.lineJoin = 'round';
+        paintCtx.lineWidth = 5;
+        paintCtx.strokeStyle = currentColor;
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+
+    function toggleMirror() {
+        isMirrored = mirrorCheckbox.checked;
+        // При переключении лучше очистить холст, так как координаты "поплывут"
+        clearCanvas();
+    }
+
+    function changeColor(color) {
+        currentColor = color;
+        paintCtx.strokeStyle = color;
+        document.querySelectorAll('.controls button').forEach(btn => {
+            btn.style.borderColor = (btn.style.backgroundColor === color || btn.classList.contains('bg-white') && color === '#ffffff') ? 'white' : 'transparent';
+        });
+    }
+
+    function clearCanvas() {
+        paintCtx.clearRect(0, 0, paintCanvas.width, paintCanvas.height);
+    }
+
+    function onResults(results) {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        // Логика отрисовки видео (зеркально или прямо)
+        if (isMirrored) {
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+        }
+        
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            statusDot.classList.replace('bg-red-500', 'bg-green-500');
+            statusText.innerText = "Рука в кадре";
+
+            for (const landmarks of results.multiHandLandmarks) {
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF0033', lineWidth: 2});
+                
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+
+                // Вычисляем координаты X в зависимости от зеркальности
+                let tx, ix;
+                if (isMirrored) {
+                    tx = (1 - thumbTip.x) * canvasElement.width;
+                    ix = (1 - indexTip.x) * canvasElement.width;
+                } else {
+                    tx = thumbTip.x * canvasElement.width;
+                    ix = indexTip.x * canvasElement.width;
+                }
+                
+                const ty = thumbTip.y * canvasElement.height;
+                const iy = indexTip.y * canvasElement.height;
+
+                const distance = Math.hypot(tx - ix, ty - iy);
+
+                if (distance < 45) {
+                    const midX = (tx + ix) / 2;
+                    const midY = (ty + iy) / 2;
+
+                    if (!isDrawing) {
+                        isDrawing = true;
+                        lastX = midX;
+                        lastY = midY;
+                    }
+
+                    paintCtx.beginPath();
+                    paintCtx.moveTo(lastX, lastY);
+                    paintCtx.lineTo(midX, midY);
+                    paintCtx.stroke();
+
+                    lastX = midX;
+                    lastY = midY;
+                    
+                    // Рисуем курсор
+                    canvasCtx.save();
+                    if (isMirrored) {
+                        canvasCtx.translate(canvasElement.width, 0);
+                        canvasCtx.scale(-1, 1);
+                    }
+                    canvasCtx.fillStyle = currentColor;
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(midX, midY, 8, 0, Math.PI * 2);
+                    canvasCtx.fill();
+                    canvasCtx.restore();
+                } else {
+                    isDrawing = false;
+                }
+            }
+        } else {
+            statusDot.classList.replace('bg-green-500', 'bg-red-500');
+            statusText.innerText = "Рука не видна";
+            isDrawing = false;
+        }
+        canvasCtx.restore();
+    }
+
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 1280,
+        height: 720
+    });
+
+    camera.start();
+</script>
+
+</body>
+</html>
